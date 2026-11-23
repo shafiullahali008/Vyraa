@@ -1,0 +1,148 @@
+
+name: VYRA Android Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'VYRA-Android-4.2.3-Full-Audit-Fix.zip'
+      - '.github/workflows/vyra-android-build.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vyra-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build VYRA debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install required Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          yes | sdkmanager --licenses || true
+
+          install_package() {
+            package="$1"
+            for attempt in 1 2 3 4 5; do
+              echo "Installing $package (attempt $attempt/5)"
+              if sdkmanager --install "$package"; then
+                return 0
+              fi
+              sleep $((attempt * 10))
+            done
+
+            echo "ERROR: Failed to install $package"
+            exit 1
+          }
+
+          install_package "platform-tools"
+          install_package "platforms;android-35"
+          install_package "build-tools;35.0.0"
+
+      - name: Verify source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP="VYRA-Android-4.2.3-Full-Audit-Fix.zip"
+
+          test -f "$ZIP"
+          unzip -tq "$ZIP"
+
+          mkdir -p source
+          unzip -q "$ZIP" -d source
+
+          PROJECT="$GITHUB_WORKSPACE/source/VYRA"
+
+          test -f "$PROJECT/settings.gradle"
+          test -f "$PROJECT/build.gradle"
+          test -f "$PROJECT/app/build.gradle"
+          test -f "$PROJECT/app/src/main/AndroidManifest.xml"
+
+          echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.9'
+          cache-provider: basic
+
+      - name: Verify build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -version
+          gradle --version
+
+          test -d "$ANDROID_HOME/platforms/android-35"
+          test -d "$ANDROID_HOME/build-tools/35.0.0"
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+
+          gradle --no-daemon --stacktrace --console=plain assembleDebug
+
+          test -s app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Run unit tests
+        id: tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle --no-daemon --stacktrace --console=plain testDebugUnitTest
+
+      - name: Upload VYRA APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: VYRA-Android-APK
+          path: source/VYRA/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload test result
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: VYRA-Test-Reports
+          path: source/VYRA/app/build/reports/tests/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Build summary
+        if: always()
+        run: |
+          echo "## VYRA Build Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "APK build step completed. Check the job status above." >> "$GITHUB_STEP_SUMMARY"
+          echo "Unit tests: ${{ steps.tests.outcome }}" >> "$GITHUB_STEP_SUMMARY"
+          
